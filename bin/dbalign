@@ -1,0 +1,151 @@
+#!/usr/bin/env python
+import argparse
+import networkx as nx
+
+
+import lib.parser
+import lib.debruijn
+
+
+def get_sequences(fastq_file):
+    fastq = lib.parser.FASTQFile(fastq_file)
+    sequences = [read.sequence for read in fastq.iterate]
+    return sequences
+
+
+def split_reads_into_mers(read, kmer_size):
+    kmer_list = []
+    for i in range((len(read) - (kmer_size - 1))):
+        kmer = read[i:i+kmer_size]
+        kmer_list.append(kmer)
+    return kmer_list
+
+
+def get_kmers_as_dict(kmer_size, sequences):
+    kmer_dict = {}
+    for sequence in sequences:
+        kmer_breakdown = split_reads_into_mers(sequence, kmer_size)
+        for kmer in kmer_breakdown:
+            if kmer in kmer_dict:
+                kmer_dict[kmer] += 1
+            else:
+                kmer_dict[kmer] = 1
+    return kmer_dict
+
+
+def add_graph_edges(graph, kmer_size):
+    is_match = False
+    for node_1 in graph.nodes:
+        for node_2 in graph.nodes:
+            if node_1 != node_2:
+                match_length, is_match = lib.debruijn.compare(node_1, node_2, kmer_size)
+            if is_match:
+                graph.add_edge(node_1, node_2, overlap=match_length)
+    return graph
+
+
+def build_db_graph(kmers, kmer_size):
+    graph = nx.DiGraph()
+    for kmer, count in kmers.items():
+        graph.add_node(kmer, count=count)
+    is_match = False
+    graph = add_graph_edges(graph, kmer_size)
+    return graph
+
+
+
+def make_simplified_string(graph, start_node, n, used_nodes):
+    simple_string = start_node
+    still_nodes = True
+    node = start_node
+    used_nodes.append(node)
+    while still_nodes:
+        successors = [succ for succ in graph.successors(node)]
+        if not successors:
+            still_nodes = False
+        elif len(successors) > 1:
+            still_nodes = False
+        else:
+            simple_string = simple_string + successors[0][n-1:]
+            node = successors[0]
+            used_nodes.append(node)
+    return simple_string, used_nodes
+
+
+
+def simplify_graph(graph, kmer_size, kmers):
+    simple_graph = nx.DiGraph()
+    for node in graph.nodes:
+        successors = [successor for successor in graph.successors(node)]
+        predecessors = [predecessor for predecessor in graph.predecessors(node)]
+        if len(successors) == 1:
+            successors_predecessors = [predecessor 
+                                       for predecessor in graph.predecessors(successors[0])]
+            if len(successors_predecessors) == 1:
+                simple_graph.add_node(node)
+    simple_graph = add_graph_edges(simple_graph, kmer_size)
+
+    simplified_strings = {}
+    starting_nodes = []
+    for node in simple_graph.nodes:
+        successors = [successor for successor in simple_graph.successors(node)]
+        predecessors = [predecessor for predecessor in simple_graph.predecessors(node)]
+        if len(predecessors) == 0:
+            starting_nodes.append(node)
+
+    for node in starting_nodes:
+        used_nodes = []
+        simple_string, used_nodes = make_simplified_string(simple_graph, node, kmer_size, used_nodes)
+        simplified_strings[simple_string] = used_nodes
+
+    graph.clear()
+
+    for kmer, count in kmers.items():
+        graph.add_node(kmer, count=count)
+
+    for simplified_string, used_nodes in simplified_strings.items():
+        graph.remove_nodes_from(used_nodes)
+        graph.add_node(simplified_string, count=1)
+    
+    graph = add_graph_edges(graph, kmer_size)
+    return graph
+
+    
+def align_graph(graph, kmer_size):
+    used_nodes = []
+    contigs = []
+    for node in graph.nodes():
+        successors = [succ for succ in graph.successors(node)]
+        predecessors = [pred for pred in graph.predecessors(node)]
+        if len(predecessors) == 0:
+            start_node = node
+            contig, used_nodes = make_simplified_string(graph, start_node, 21, used_nodes)
+            contigs.append(contig)
+            break
+    return contigs
+            
+
+
+def main(args):
+    sequences = get_sequences(args.fastq_file)
+    kmers = get_kmers_as_dict(args.kmer_size, sequences)
+    graph = build_db_graph(kmers, args.kmer_size)
+    graph = simplify_graph(graph, args.kmer_size, kmers)
+    contigs = align_graph(graph, args.kmer_size)
+    print(contigs)
+
+
+
+def get_arguments():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('fastq_file')
+    parser.add_argument('kmer_size', type=int)
+    args = parser.parse_args()
+    return args
+
+
+
+if __name__ == '__main__':
+    args = get_arguments()
+    main(args)
+
